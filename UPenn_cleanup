@@ -1,0 +1,136 @@
+import pandas as pd
+
+#### NOTE THE FILE PATH WILL NEED TO BE EDITED IF YOU RUN ON YOUR MACHINE ####
+file_path = r"C:\Users\dckee\Downloads\UPenn_pricing.csv"
+df = pd.read_csv(
+    file_path,
+    skiprows=2,
+    low_memory=False
+)
+print(df.head())
+print(df.columns)
+print(df.shape)
+
+# First 18 columns (by position)
+first_18_cols = list(df.columns[:18])
+
+# Columns after 18 that contain "negotiated_dollar"
+# Everything before that was description, coding, gross, and cash prices
+negotiated_cols = [
+    col for col in df.columns[18:]
+    if "negotiated_dollar" in col.lower()
+]
+
+# Combine
+cols_to_keep = first_18_cols + negotiated_cols
+df = df[cols_to_keep]
+
+
+# Ssanity check
+print(df.shape)
+print(df.columns)
+
+# Keep just the CPT coded items
+df = df[
+    (df.iloc[:, 4] == "CPT") |
+    (df.iloc[:, 6] == "CPT")
+]
+
+# Sanity check
+print(df.shape)
+
+print("Column 5 values:")
+print(df.iloc[:, 4].value_counts())
+
+print("\nColumn 7 values:")
+print(df.iloc[:, 6].value_counts())
+
+# Output
+output_path = r"C:\Users\dckee\Downloads\UPenn_pricing_clean.csv"
+
+df.to_csv(output_path, index=False)
+
+
+#### Move unique payer CPT combinations into their own lines ####
+
+# 1) re-identify negotiated_dollar columns (wide -> long targets)
+negotiated_cols = [c for c in df.columns if "negotiated_dollar" in c.lower()]
+
+# 2) Build a unified CPT column from columns code|2 and code|3
+# Assume the code type columns exist (code|2|type, code|3|type)
+# Function to ensure clean inputs
+def clean_str(s):
+    return s.astype(str).str.strip()
+
+code2 = clean_str(df["code|2"])
+type2 = clean_str(df["code|2|type"]).str.upper()
+
+code3 = clean_str(df["code|3"])
+type3 = clean_str(df["code|3|type"]).str.upper()
+
+# Valid CPT if type contains 'CPT' and code looks non-empty/non-null
+valid2 = type2.str.contains("CPT", na=False) & ~code2.isin(["", "nan", "None"])
+valid3 = type3.str.contains("CPT", na=False) & ~code3.isin(["", "nan", "None"])
+
+# Prefer code|2 CPT, else fallback to code|3 CPT
+df["cpt_code"] = pd.NA
+df.loc[valid2, "cpt_code"] = df.loc[valid2, "code|2"].astype(str).str.strip()
+df.loc[~valid2 & valid3, "cpt_code"] = df.loc[~valid2 & valid3, "code|3"].astype(str).str.strip()
+
+# Drop rows where we couldn't find a CPT in code|2 or code|3
+df = df.dropna(subset=["cpt_code"])
+
+# 3) ID columns to keep (procedure-level descriptors)
+id_cols = [
+    "description",
+    "cpt_code",
+    "setting",
+    "billing_class",
+    "modifiers",
+    "standard_charge|gross",
+    "standard_charge|discounted_cash",
+    # keep originals for debugging:
+    "code|2", "code|2|type", "code|3", "code|3|type"
+]
+
+# Keep only id cols that actually exist
+id_cols = [c for c in id_cols if c in df.columns]
+
+# 4) Melt wide payer columns into long rows
+df_long = df.melt(
+    id_vars=id_cols,
+    value_vars=negotiated_cols,
+    var_name="payer_raw",
+    value_name="negotiated_rate"
+)
+
+# 5) Drop empty negotiated rates
+df_long = df_long.dropna(subset=["negotiated_rate"])
+
+# Convert negotiated_rate to numeric (handles strings like "123.45")
+df_long["negotiated_rate"] = pd.to_numeric(df_long["negotiated_rate"], errors="coerce")
+df_long = df_long.dropna(subset=["negotiated_rate"])
+
+# 6) Parse payer / plan from the column header:
+# standard_charge|<payer>|<plan>|negotiated_dollar
+parts = df_long["payer_raw"].str.split("|", expand=True)
+
+df_long["payer"] = parts[1]
+df_long["plan"]  = parts[2]
+
+# 7) Final cleanup
+df_long = df_long.drop(columns=["payer_raw"])
+
+# Remove duplicates if the file has repeated rows
+df_long = df_long.drop_duplicates(subset=["cpt_code", "payer", "plan", "setting", "billing_class", "negotiated_rate"])
+
+# 8) Sanity check
+print(df_long.head())
+print("Shape:", df_long.shape)
+print("Unique CPTs:", df_long["cpt_code"].nunique())
+print("Unique payers:", df_long["payer"].nunique())
+
+# 9) Export long file
+out_path = r"C:\Users\dckee\Downloads\UPenn_pricing_long.csv"
+df_long.to_csv(out_path, index=False)
+print("Saved:", out_path)
